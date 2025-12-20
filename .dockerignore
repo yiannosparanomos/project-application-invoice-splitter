@@ -6,5 +6,6 @@ __pycache__/
 .env
 data/
 uploads/
+certs/
 node_modules/
 *.log

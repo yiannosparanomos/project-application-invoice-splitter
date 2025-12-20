@@ -8,7 +8,10 @@ import datetime as dt
 import json
 import os
 import re
+import ssl
 import sys
+import threading
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -18,6 +21,13 @@ from pathlib import Path
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
 
+try:
+    from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import FileResponse
+    from fastapi.staticfiles import StaticFiles
+except ImportError:  # fastapi/uvicorn not installed in non-ASGI runs
+    FastAPI = None  # type: ignore
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 DATA_DIR = BASE_DIR / "data"
@@ -128,6 +138,41 @@ def parse_invoice(html_text):
         running = sum((it.get("total") or 0) for it in invoice["items"])
         invoice["total_amount"] = round(running, 2)
     return invoice
+
+
+def create_receipt_entry(html_text="", paid_by="", title="", notes="", file_bytes=None):
+    ensure_dirs()
+    if isinstance(html_text, bytes):
+        try:
+            html_text = html_text.decode("utf-8", errors="ignore")
+        except Exception:
+            html_text = ""
+    invoice = parse_invoice(html_text or "")
+    receipt_id = uuid.uuid4().hex[:8]
+    filename_saved = None
+    if file_bytes:
+        filename_saved = f"receipt-{receipt_id}.html"
+        with (UPLOAD_DIR / filename_saved).open("wb") as fh:
+            fh.write(file_bytes)
+
+    state = load_state()
+    paid_by_final = paid_by or (state["people"][0] if state["people"] else None)
+    receipt = {
+        "id": receipt_id,
+        "title": (title or "").strip() or invoice.get("invoice_number") or f"Receipt {dt.date.today()}",
+        "supplier": invoice.get("supplier_name"),
+        "paid_by": paid_by_final,
+        "currency": invoice.get("currency") or "EUR",
+        "total_amount": invoice.get("total_amount") or 0,
+        "items": invoice.get("items", []),
+        "payment_method": invoice.get("payment_method"),
+        "notes": (notes or "").strip(),
+        "raw_html_file": filename_saved,
+        "created_at": dt.datetime.utcnow().isoformat() + "Z",
+    }
+    state["receipts"].append(receipt)
+    save_state(state)
+    return receipt
 
 
 def post_qr_for_data(file_bytes, filename="qr.png", timeout=10):
@@ -262,6 +307,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "summary": compute_summary(state)
             }
             return self.send_json(payload)
+        if path.startswith("/static/"):
+            self.path = path[len("/static"):] or "/"
+            return super().do_GET()
         if path.startswith("/uploads/"):
             return super().do_GET()
         if path == "/" or path == "":
@@ -315,6 +363,7 @@ class AppHandler(SimpleHTTPRequestHandler):
             html_text = form.getvalue("html_text", "")
             paid_by = form.getvalue("paid_by", "")
             title = form.getvalue("title", "")
+            notes = form.getvalue("notes", "")
             html_file = form["html_file"] if "html_file" in form else None
             if html_file is not None and getattr(html_file, "file", None):
                 file_bytes = html_file.file.read()
@@ -328,39 +377,16 @@ class AppHandler(SimpleHTTPRequestHandler):
             html_text = data.get("html_text", "")
             paid_by = data.get("paid_by", "")
             title = data.get("title", "")
+            notes = data.get("notes", "")
             html_file = None
 
-        if isinstance(html_text, bytes):
-            try:
-                html_text = html_text.decode("utf-8", errors="ignore")
-            except Exception:
-                html_text = ""
-        invoice = parse_invoice(html_text or "")
-        receipt_id = uuid.uuid4().hex[:8]
-        filename_saved = None
-        if html_file is not None and getattr(html_file, "filename", None):
-            filename_saved = f"receipt-{receipt_id}.html"
-            with (UPLOAD_DIR / filename_saved).open("wb") as fh:
-                if file_bytes is not None:
-                    fh.write(file_bytes)
-                else:
-                    fh.write(html_file.file.read())
-
-        state = load_state()
-        receipt = {
-            "id": receipt_id,
-            "title": title.strip() or invoice.get("invoice_number") or f"Receipt {dt.date.today()}",
-            "supplier": invoice.get("supplier_name"),
-            "paid_by": paid_by or (state["people"][0] if state["people"] else None),
-            "currency": invoice.get("currency") or "EUR",
-            "total_amount": invoice.get("total_amount") or 0,
-            "items": invoice.get("items", []),
-            "payment_method": invoice.get("payment_method"),
-            "raw_html_file": filename_saved,
-            "created_at": dt.datetime.utcnow().isoformat() + "Z",
-        }
-        state["receipts"].append(receipt)
-        save_state(state)
+        receipt = create_receipt_entry(
+            html_text=html_text or file_bytes or "",
+            paid_by=paid_by,
+            title=title,
+            notes=notes,
+            file_bytes=file_bytes,
+        )
         return self.send_json({"ok": True, "receipt": receipt})
 
     def handle_qr_decode(self):
@@ -442,7 +468,18 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "Receipt not found"}, status=404)
         if paid_by and paid_by in state["people"]:
             receipt["paid_by"] = paid_by
-            save_state(state)
+        save_state(state)
+        return self.send_json({"ok": True})
+
+    def handle_delete_receipt(self, path):
+        parts = path.rstrip("/").split("/")
+        receipt_id = parts[3]
+        state = load_state()
+        before = len(state.get("receipts", []))
+        state["receipts"] = [r for r in state.get("receipts", []) if r.get("id") != receipt_id]
+        if len(state["receipts"]) == before:
+            return self.send_json({"error": "Receipt not found"}, status=404)
+        save_state(state)
         return self.send_json({"ok": True})
 
     def handle_bulk_participants(self, path):
@@ -465,19 +502,223 @@ class AppHandler(SimpleHTTPRequestHandler):
         save_state(state)
         return self.send_json({"ok": True})
 
+    def do_DELETE(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if re.match(r"^/api/receipts/[^/]+$", path.rstrip("/")):
+            return self.handle_delete_receipt(path)
+        return self.send_json({"error": "Not found"}, status=404)
 
-def run(port=8000):
+
+def create_server(port):
+    return ThreadingHTTPServer(("0.0.0.0", port), AppHandler)
+
+
+def run(port, ssl_cert=None, ssl_key=None, ssl_port=None, disable_http=False):
     ensure_dirs()
-    server = ThreadingHTTPServer(("0.0.0.0", port), AppHandler)
-    print(f"Server ready on http://localhost:{port}")
+    servers = []
+    threads = []
+
+    if disable_http and not (ssl_cert and ssl_key):
+        raise RuntimeError("DISABLE_HTTP=1 set but no SSL_CERTFILE/SSL_KEYFILE provided.")
+
+    http_port = int(port)
+    if not disable_http:
+        http_server = create_server(http_port)
+        servers.append(("http", http_server, http_port))
+    else:
+        debug("http listener disabled via DISABLE_HTTP=1")
+
+    if ssl_cert and ssl_key:
+        try:
+            https_port = int(ssl_port or (http_port if disable_http else 8443))
+            # Avoid binding the same port twice; HTTPS takes precedence.
+            servers = [entry for entry in servers if entry[2] != https_port]
+            https_server = create_server(https_port)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=ssl_cert, keyfile=ssl_key)
+            https_server.socket = context.wrap_socket(https_server.socket, server_side=True)
+            servers.append(("https", https_server, https_port))
+        except FileNotFoundError as e:
+            debug(f"ssl setup failed (missing file): {e}")
+        except ssl.SSLError as e:
+            debug(f"ssl setup failed: {e}")
+        except Exception as e:  # pragma: no cover - safety net
+            debug(f"ssl setup unexpected error: {e}")
+
+    if not servers:
+        raise RuntimeError("No servers started; check port configuration.")
+
+    for scheme, server, listen_port in servers:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        threads.append((scheme, server, listen_port, thread))
+        print(f"Server ready on {scheme}://localhost:{listen_port}")
+
     try:
-        server.serve_forever()
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopping server...")
     finally:
-        server.server_close()
+        for _scheme, server, _listen_port, _thread in threads:
+            server.shutdown()
+            server.server_close()
+
+
+def create_fastapi_app():
+    if FastAPI is None:
+        raise RuntimeError("FastAPI is not installed. Install fastapi and uvicorn to use the ASGI app.")
+    ensure_dirs()
+    app = FastAPI()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR), check_dir=False), name="uploads")
+
+    @app.get("/")
+    async def index():
+        return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/api/state")
+    async def api_state():
+        state = load_state()
+        return {
+            "people": state.get("people", []),
+            "receipts": state.get("receipts", []),
+            "summary": compute_summary(state),
+        }
+
+    @app.post("/api/people")
+    async def api_people(payload: dict = Body(...)):
+        name = (payload.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="Name required")
+        state = load_state()
+        if name not in state["people"]:
+            state["people"].append(name)
+            save_state(state)
+        return {"ok": True, "people": state["people"]}
+
+    @app.post("/api/receipts")
+    async def api_receipts(
+        request: Request,
+        html_file: UploadFile | None = File(default=None),
+        html_text: str = Form(default=""),
+        paid_by: str = Form(default=""),
+        title: str = Form(default=""),
+        notes: str = Form(default=""),
+    ):
+        file_bytes = await html_file.read() if html_file else None
+        ctype = request.headers.get("content-type", "")
+        if ctype.startswith("application/json"):
+            data = await request.json()
+            html_text = data.get("html_text", "")
+            paid_by = data.get("paid_by", "")
+            title = data.get("title", "")
+            notes = data.get("notes", "")
+        receipt = create_receipt_entry(
+            html_text=html_text or file_bytes or "",
+            paid_by=paid_by,
+            title=title,
+            notes=notes,
+            file_bytes=file_bytes,
+        )
+        return {"ok": True, "receipt": receipt}
+
+    @app.post("/api/qr/decode")
+    async def api_qr_decode(file: UploadFile = File(...)):
+        file_bytes = await file.read()
+        if not file_bytes:
+            raise HTTPException(status_code=400, detail="Empty file")
+        size_bytes = len(file_bytes)
+        if size_bytes > 1_200_000:
+            debug("qr decode: warning image over recommended 1MB, API may reject")
+        try:
+            decoded_url = post_qr_for_data(file_bytes, filename=file.filename or "qr.png")
+        except urllib.error.URLError as e:
+            raise HTTPException(status_code=502, detail=f"QR decode failed: {e}") from e
+        if not decoded_url:
+            raise HTTPException(status_code=422, detail="Could not read QR code")
+        html_text = None
+        try:
+            if decoded_url.startswith("http://") or decoded_url.startswith("https://"):
+                html_text = fetch_html(decoded_url)
+        except urllib.error.URLError:
+            debug("qr decode fetch html URLError")
+        return {"ok": True, "qr_data": decoded_url, "html_text": html_text}
+
+    @app.post("/api/receipts/{receipt_id}/participants")
+    async def api_participants(receipt_id: str, payload: dict = Body(...)):
+        item_id = payload.get("item_id")
+        participants = payload.get("participants") or []
+        state = load_state()
+        receipt = next((r for r in state["receipts"] if r["id"] == receipt_id), None)
+        if not receipt:
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        item = next((i for i in receipt.get("items", []) if i["id"] == item_id), None)
+        if not item:
+            raise HTTPException(status_code=404, detail="Item not found")
+        valid = [p for p in participants if p in state["people"]]
+        item["participants"] = valid
+        save_state(state)
+        return {"ok": True}
+
+    @app.post("/api/receipts/{receipt_id}/paid_by")
+    async def api_paid_by(receipt_id: str, payload: dict = Body(...)):
+        paid_by = (payload.get("paid_by") or "").strip()
+        state = load_state()
+        receipt = next((r for r in state["receipts"] if r["id"] == receipt_id), None)
+        if not receipt:
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        if paid_by and paid_by in state["people"]:
+            receipt["paid_by"] = paid_by
+            save_state(state)
+        return {"ok": True}
+
+    @app.post("/api/receipts/{receipt_id}/bulk")
+    async def api_bulk(receipt_id: str, payload: dict = Body(...)):
+        mode = payload.get("mode")
+        state = load_state()
+        receipt = next((r for r in state["receipts"] if r["id"] == receipt_id), None)
+        if not receipt:
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        if mode == "all":
+            for item in receipt.get("items", []):
+                item["participants"] = list(state["people"])
+        elif mode == "none":
+            for item in receipt.get("items", []):
+                item["participants"] = []
+        else:
+            raise HTTPException(status_code=400, detail="Invalid mode")
+        save_state(state)
+        return {"ok": True}
+
+    @app.delete("/api/receipts/{receipt_id}")
+    async def api_delete_receipt(receipt_id: str):
+        state = load_state()
+        before = len(state.get("receipts", []))
+        state["receipts"] = [r for r in state.get("receipts", []) if r.get("id") != receipt_id]
+        if len(state["receipts"]) == before:
+            raise HTTPException(status_code=404, detail="Receipt not found")
+        save_state(state)
+        return {"ok": True}
+
+    return app
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "8005"))
-    run(port)
+    port = int(os.environ.get("PORT", "8000"))
+    ssl_cert = os.environ.get("SSL_CERTFILE")
+    ssl_key = os.environ.get("SSL_KEYFILE")
+    ssl_port = os.environ.get("SSL_PORT")
+    disable_http = os.environ.get("DISABLE_HTTP", "").lower() in ("1", "true", "yes")
+    run(port=port, ssl_cert=ssl_cert, ssl_key=ssl_key, ssl_port=ssl_port, disable_http=disable_http)
+
+# ASGI entrypoint for uvicorn
+app = create_fastapi_app() if FastAPI is not None else None

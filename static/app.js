@@ -7,14 +7,14 @@ const state = {
 const peopleList = document.getElementById("peopleList");
 const personForm = document.getElementById("personForm");
 const personName = document.getElementById("personName");
-const receiptForm = document.getElementById("receiptForm");
-const paidBySelect = document.getElementById("paidBySelect");
 const receiptsEl = document.getElementById("receipts");
 const summaryList = document.getElementById("summaryList");
 const qrForm = document.getElementById("qrForm");
 const qrStatus = document.getElementById("qrStatus");
-const htmlTextArea = document.querySelector('textarea[name="html_text"]');
 const qrPaidBy = document.getElementById("qrPaidBy");
+const invoiceTitleInput = document.getElementById("invoiceTitle");
+const notesInput = document.getElementById("invoiceNotes");
+const MAX_UPLOAD_BYTES = 950 * 1024; // target under 1MB
 
 async function loadState() {
   const res = await fetch("/api/state");
@@ -34,8 +34,12 @@ function renderPeople() {
 
 function renderPaidBySelect() {
   const options = state.people.map((p) => `<option value="${p}">${p}</option>`).join("");
-  if (paidBySelect) paidBySelect.innerHTML = options;
-  if (qrPaidBy) qrPaidBy.innerHTML = `<option value="">Paid by</option>` + options;
+  if (qrPaidBy) {
+    qrPaidBy.innerHTML = `<option value="">Paid by</option>` + options;
+    if (!qrPaidBy.value && state.people.length) {
+      qrPaidBy.value = state.people[0];
+    }
+  }
 }
 
 function renderSummary() {
@@ -69,12 +73,13 @@ function renderReceipts() {
       const paidBy = r.paid_by || "";
       const total = r.total_amount ?? 0;
       const supplier = r.supplier ? `<span class="pill">${r.supplier}</span>` : "";
+      const notes = r.notes ? `<p class="muted small" style="margin-top:6px;">${r.notes}</p>` : "";
       return `
       <article class="receipt-card" data-receipt="${r.id}">
         <div class="receipt-head">
           <div class="meta">
             <strong>${r.title || "Receipt"}</strong>
-            <span class="muted small">${items.length} items · Total EUR ${total.toFixed(2)}</span>
+            <span class="muted small">${items.length} items - Total EUR ${total.toFixed(2)}</span>
             ${supplier}
           </div>
           <div class="muted small">Paid by
@@ -83,8 +88,10 @@ function renderReceipts() {
                 .map((p) => `<option value="${p}" ${p === paidBy ? "selected" : ""}>${p}</option>`)
                 .join("")}
             </select>
+            <button class="btn ghost danger small" data-delete="${r.id}" title="Delete receipt">🗑</button>
           </div>
         </div>
+        ${notes}
         <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
           <button class="btn ghost" data-bulk="all" data-receipt="${r.id}">Join all items for everyone</button>
           <button class="btn ghost" data-bulk="none" data-receipt="${r.id}">Clear selections</button>
@@ -130,6 +137,9 @@ function renderReceipts() {
   });
   receiptsEl.querySelectorAll("[data-bulk]").forEach((btn) => {
     btn.addEventListener("click", () => handleBulk(btn));
+  });
+  receiptsEl.querySelectorAll("[data-delete]").forEach((btn) => {
+    btn.addEventListener("click", () => handleDelete(btn.dataset.delete));
   });
 }
 
@@ -181,28 +191,112 @@ personForm.addEventListener("submit", async (e) => {
   await loadState();
 });
 
-receiptForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const formData = new FormData(receiptForm);
+function readFileAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+async function resizeImageIfNeeded(file, maxBytes = MAX_UPLOAD_BYTES) {
+  if (!file || file.size <= maxBytes) return file;
+  try {
+    const dataUrl = await readFileAsDataURL(file);
+    const img = await loadImage(dataUrl);
+    let scale = 1.0;
+    const minDim = 800;
+    const makeBlob = async (s, q) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(img.width * s));
+      canvas.height = Math.max(1, Math.round(img.height * s));
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      return await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", q));
+    };
+
+    let bestBlob = null;
+    while (scale >= minDim / Math.max(img.width, img.height)) {
+      for (let quality of [0.92, 0.85, 0.75, 0.65, 0.55]) {
+        const blob = await makeBlob(scale, quality);
+        if (blob && (!bestBlob || blob.size < bestBlob.size)) {
+          bestBlob = blob;
+        }
+        if (blob && blob.size <= maxBytes) {
+          const name = (file.name || "upload").replace(/\.(png|jpe?g|webp)$/i, "") + ".jpg";
+          return new File([blob], name, { type: "image/jpeg" });
+        }
+      }
+      scale = Math.max(scale - 0.15, minDim / Math.max(img.width, img.height));
+    }
+    if (bestBlob && bestBlob.size < file.size) {
+      const name = (file.name || "upload").replace(/\.(png|jpe?g|webp)$/i, "") + ".jpg";
+      return new File([bestBlob], name, { type: "image/jpeg" });
+    }
+  } catch (err) {
+    console.warn("resize failed, using original file", err);
+  }
+  return file;
+}
+
+async function createReceiptFromHtml(htmlText, paidBy) {
+  const formData = new FormData();
+  formData.append("html_text", htmlText || "");
+  if (paidBy) formData.append("paid_by", paidBy);
+  if (invoiceTitleInput?.value) formData.append("title", invoiceTitleInput.value);
+  if (notesInput?.value) formData.append("notes", notesInput.value);
   const res = await fetch("/api/receipts", {
     method: "POST",
     body: formData,
   });
-  if (!res.ok) {
-    alert("Could not add receipt. Please check your HTML input.");
-    return;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || "Could not add receipt.");
   }
-  receiptForm.reset();
   await loadState();
-});
+  return data.receipt;
+}
+
+async function handleDelete(receiptId) {
+  await fetch(`/api/receipts/${receiptId}`, { method: "DELETE" });
+  await loadState();
+}
 
 if (qrForm) {
   qrForm.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const formData = new FormData(qrForm);
-    qrStatus.textContent = "Decoding QR...";
+    const fileInput = document.getElementById("qrFile");
+    const file = fileInput?.files?.[0];
+    if (!file) {
+      qrStatus.textContent = "Please choose a receipt image first.";
+      qrStatus.style.color = "#f28b82";
+      return;
+    }
+    qrStatus.textContent = "Preparing image...";
     qrStatus.style.color = "";
     try {
+      const resized = await resizeImageIfNeeded(file);
+      const formData = new FormData();
+      formData.append("file", resized, resized.name || file.name || "receipt.jpg");
+      if (qrPaidBy) formData.append("paid_by", qrPaidBy.value);
+
+      if (resized.size < file.size) {
+        const kb = Math.round(resized.size / 1024);
+        qrStatus.textContent = `Uploading compressed image (~${kb} KB)...`;
+      } else {
+        qrStatus.textContent = "Uploading receipt image...";
+      }
+
       const res = await fetch("/api/qr/decode", {
         method: "POST",
         body: formData,
@@ -213,16 +307,15 @@ if (qrForm) {
       }
       const parts = [];
       if (data.qr_data) parts.push(`QR: ${data.qr_data}`);
-      if (data.html_text) {
-        htmlTextArea.value = data.html_text;
-        parts.push("HTML fetched and loaded below.");
-        if (qrPaidBy && paidBySelect) {
-          const selected = qrPaidBy.value || paidBySelect.value;
-          if (selected) paidBySelect.value = selected;
-        }
-      } else {
-        parts.push("No HTML fetched, but QR decoded.");
-      }
+      if (!data.html_text) throw new Error("No HTML returned from QR decode.");
+
+      const paidBy = qrPaidBy ? qrPaidBy.value : "";
+      qrStatus.textContent = "Parsing and saving receipt...";
+      const receipt = await createReceiptFromHtml(data.html_text, paidBy);
+      parts.push(`Receipt saved (${receipt.title || "Receipt"})`);
+      if (invoiceTitleInput) invoiceTitleInput.value = "";
+      if (notesInput) notesInput.value = "";
+      if (fileInput) fileInput.value = "";
       qrStatus.textContent = parts.join(" ");
     } catch (err) {
       qrStatus.textContent = err.message || "QR decode failed";
