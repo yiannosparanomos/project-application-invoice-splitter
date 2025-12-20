@@ -49,7 +49,7 @@ def debug(msg):
 
 
 DEFAULT_STATE = {
-    "people": ["Alex", "Jamie", "Taylor"],
+    "people": ["Yiannos", "Ntinos", "Ari", "Eva", "Spiros", "Athanasia", "Rozina", "Anna"],
     "receipts": []
 }
 

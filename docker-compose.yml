@@ -8,22 +8,13 @@ services:
     image: trip-splitter:latest
     environment:
       PORT: "${PORT:-8000}"
-      SSL_PORT: "${SSL_PORT:-8443}"
-      SSL_CERTFILE: "${SSL_CERTFILE:-}"
-      SSL_KEYFILE: "${SSL_KEYFILE:-}"
-      DISABLE_HTTP: "${DISABLE_HTTP:-}"
     command: >
       uvicorn app:app
       --host 0.0.0.0
       --port ${PORT:-8000}
-      --reload
-      --reload-dir /app
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
-      - "${SSL_PORT:-8443}:${SSL_PORT:-8443}"
     volumes:
-      - .:/app
       - ./data:/app/data
       - ./uploads:/app/uploads
-      - ./certs:/certs:ro
     restart: unless-stopped

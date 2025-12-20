@@ -10,7 +10,7 @@ python3 app.py
 
 ## Run with Docker Compose
 ```bash
-# build and start
+# build and start (staging or VPS)
 docker compose up -d --build
 
 # logs (optional)
@@ -21,9 +21,8 @@ docker compose down
 ```
 
 Notes:
-- HTTP on `PORT` (default 8000); override with `PORT=9000 docker compose up -d --build`. Compose runs `uvicorn app:app --reload` so code changes hot-reload when the repo is mounted in the container.
-- Optional HTTPS on `SSL_PORT` (default 8443). Map host 443 by editing `docker-compose.yml` ports to `443:${SSL_PORT:-8443}`.
-- `DISABLE_HTTP=1` turns off plain HTTP when you only want HTTPS.
+- HTTP on `PORT` (default 8000); override with `PORT=9000 docker compose up -d --build`.
+- SSL/TLS should terminate at your VPS reverse proxy (nginx/caddy/etc.); the container serves plain HTTP on `PORT`.
 - Host volumes `./data` and `./uploads` hold state/uploads so the image stays lean.
 
 ## Build & run with Docker (optional)
@@ -38,17 +37,4 @@ docker run -d --name trip-splitter -p 8000:8000 ^
 
 Image stays slim (python:3.11-slim, no pip deps) and runs as a non-root user.
 
-## Enable HTTPS (staging or prod)
-1) Put a cert/key in `./certs` (PEM). Self-signed example for staging:
-```bash
-openssl req -x509 -nodes -newkey rsa:2048 -days 365 ^
-  -keyout certs/server.key ^
-  -out certs/server.crt ^
-  -subj "/CN=localhost"
-```
-2) Start with TLS env vars:
-```bash
-SSL_CERTFILE=/certs/server.crt SSL_KEYFILE=/certs/server.key docker compose up -d --build
-```
-   PowerShell alternative: `$env:SSL_CERTFILE="/certs/server.crt"; $env:SSL_KEYFILE="/certs/server.key"; docker compose up -d --build`. You can also drop these into a `.env` file.
-3) For cloud with a real CA, replace the cert/key with the CA-issued pair (DNS/HTTP validation is done outside this app). Set `DISABLE_HTTP=1` if you only want HTTPS. Map host 443 to the container’s `SSL_PORT` (8443 by default) in `docker-compose.yml`.
+SSL is handled outside the container (reverse proxy), so no in-container certs are needed.

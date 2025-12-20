@@ -11,12 +11,11 @@
   <main class="page">
     <header class="hero">
       <div>
-        <p class="eyebrow">Python powered · No login required</p>
+        <p class="eyebrow">Scan · Parse · Split</p>
         <h1>Trip Splitter</h1>
-        <p class="lede">Minimal, grid-first cost splitter. Scan the QR on the receipt, pull the HTML, and tick who is in for what.</p>
+        <p class="lede">An invoice split utility for our Mendenitsa trip. Scan the QR on the receipt, pull the HTML, and tick who is in for what.</p>
         <div class="badges">
           <span class="badge">Scan · Parse · Split</span>
-          <span class="badge ghost">Monochrome</span>
         </div>
       </div>
       <section class="panel summary-panel">
@@ -55,7 +54,6 @@
       <form id="qrForm" class="inline-form" enctype="multipart/form-data">
         <input type="file" name="file" id="qrFile" accept="image/*" capture="environment" required>
         <select id="qrPaidBy"></select>
-        <button type="submit" class="btn">Upload receipt</button>
         <div class="form-row" style="width:100%; margin-top:10px;">
           <label for="invoiceTitle">Invoice name (optional)</label>
           <input type="text" id="invoiceTitle" name="title" placeholder="Metro supermarket run">
@@ -64,6 +62,7 @@
           <label for="invoiceNotes">Notes</label>
           <textarea id="invoiceNotes" name="notes" rows="3" placeholder="Add notes about this receipt"></textarea>
         </div>
+        <button type="submit" class="btn">Upload receipt</button>
       </form>
       <p id="qrStatus" class="muted small" style="margin-top:8px;"></p>
     </section>
