@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Trip Splitter</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="grid"></div>
+  <main class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Python powered · No login required</p>
+        <h1>Trip Splitter</h1>
+        <p class="lede">Minimal, grid-first cost splitter. Scan the QR on the receipt, pull the HTML, and tick who is in for what.</p>
+        <div class="badges">
+          <span class="badge">Scan · Parse · Split</span>
+          <span class="badge ghost">Monochrome</span>
+        </div>
+      </div>
+      <section class="panel summary-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Balances</p>
+            <h3>Who owes what</h3>
+          </div>
+        </div>
+        <div id="summaryList" class="summary-list"></div>
+      </section>
+    </header>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Friends</p>
+          <h3>Who is on this trip?</h3>
+        </div>
+      </div>
+      <div id="peopleList" class="chips"></div>
+      <form id="personForm" class="inline-form">
+        <input type="text" id="personName" name="name" placeholder="Add a friend (e.g. Sam)" required>
+        <button type="submit" class="btn">Add</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Scan QR</p>
+          <h3>Upload receipt photo</h3>
+          <p class="muted small">Drop a receipt photo. We call api.qrserver.com to decode the QR, fetch the invoice HTML, and drop it into the form below.</p>
+        </div>
+      </div>
+      <form id="qrForm" class="inline-form" enctype="multipart/form-data">
+        <input type="file" name="file" id="qrFile" accept="image/*" capture="environment" required>
+        <select id="qrPaidBy"></select>
+        <button type="submit" class="btn">Decode QR &amp; fetch HTML</button>
+      </form>
+      <p id="qrStatus" class="muted small" style="margin-top:8px;"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">New receipt</p>
+          <h3>Upload QR HTML</h3>
+          <p class="muted small">Paste the HTML you get from the QR code site or upload the saved HTML file. We will parse items and totals automatically.</p>
+        </div>
+      </div>
+      <form id="receiptForm" class="stack-form" enctype="multipart/form-data">
+        <div class="form-row">
+          <label>Title</label>
+          <input type="text" name="title" placeholder="Metro supermarket run">
+        </div>
+        <div class="form-row">
+          <label>Paid by</label>
+          <select name="paid_by" id="paidBySelect"></select>
+        </div>
+        <div class="form-row">
+          <label>HTML file (from QR)</label>
+          <input type="file" name="html_file" accept=".html,text/html">
+        </div>
+        <div class="form-row">
+          <label>or paste HTML</label>
+          <textarea name="html_text" rows="6" placeholder="Paste the raw HTML here"></textarea>
+        </div>
+        <button type="submit" class="btn">Add receipt</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Receipts</p>
+          <h3>Items &amp; participation</h3>
+        </div>
+      </div>
+      <div id="receipts"></div>
+    </section>
+  </main>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
