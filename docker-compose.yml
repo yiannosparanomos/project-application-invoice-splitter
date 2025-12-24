@@ -12,9 +12,9 @@ services:
       uvicorn app:app
       --host 0.0.0.0
       --port ${PORT:-8000}
+      --reload
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     volumes:
-      - ./data:/app/data
-      - ./uploads:/app/uploads
+      - .:/app
     restart: unless-stopped

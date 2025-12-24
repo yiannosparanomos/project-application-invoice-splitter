@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Trip Splitter!!!</title>
+  <title>Trip Splitter</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -16,6 +16,13 @@
         <p class="lede">An invoice split utility for our Mendenitsa trip. Scan the QR on the receipt, pull the HTML, and tick who is in for what.</p>
         <div class="badges">
           <span class="badge">Scan · Parse · Split</span>
+        </div>
+        <div class="user-bar">
+          <div>
+            <p class="eyebrow">Using app as</p>
+            <h4 id="currentUserLabel">Select yourself</h4>
+          </div>
+          <button type="button" class="btn ghost" id="switchUserBtn">Switch user</button>
         </div>
       </div>
       <section class="panel summary-panel">
@@ -77,6 +84,24 @@
       <div id="receipts"></div>
     </section>
   </main>
+
+  <div id="userOverlay" class="overlay hidden">
+    <div class="overlay-card">
+      <div class="overlay-head">
+        <div>
+          <p class="eyebrow">Who are you?</p>
+          <h3>Use the app as yourself</h3>
+          <p class="muted small">Pick your name below or add a new one.</p>
+        </div>
+        <button type="button" class="icon-btn" id="overlayClose" aria-label="Close">✕</button>
+      </div>
+      <div id="overlayPeople" class="chips selectable"></div>
+      <form id="overlayAddForm" class="inline-form">
+        <input type="text" id="overlayNewPerson" name="name" placeholder="Add yourself (e.g. Maria)" required>
+        <button type="submit" class="btn">Save &amp; continue</button>
+      </form>
+    </div>
+  </div>
 
   <script src="/static/app.js" type="module"></script>
 </body>

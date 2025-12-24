@@ -239,6 +239,42 @@ select:focus {
   border: 1px solid var(--border);
 }
 
+.btn.small {
+  padding: 8px 12px;
+  font-size: 14px;
+  border-radius: 10px;
+}
+
+.btn.primary {
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: #050505;
+}
+
+.icon-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.hidden {
+  display: none;
+}
+
+.user-bar {
+  margin-top: 18px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  width: fit-content;
+}
+
 .receipt-card {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -278,6 +314,27 @@ select:focus {
   font-weight: 600;
 }
 
+.items-table .qty-col,
+.items-table .unit-col {
+  display: none;
+}
+
+.receipt-card.show-verbose .qty-col,
+.receipt-card.show-verbose .unit-col {
+  display: table-cell;
+}
+
+.items-table .mobile-join {
+  display: none;
+  width: 42px;
+  text-align: center;
+}
+
+.items-table .mobile-join input {
+  width: 18px;
+  height: 18px;
+}
+
 .pill {
   display: inline-block;
   padding: 4px 10px;
@@ -302,6 +359,137 @@ select:focus {
   border: 1px solid var(--border);
 }
 
+.participant-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.participant-list .chip {
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.participant-list .chip.me {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #050505;
+}
+
+.join-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  z-index: 99;
+}
+
+.overlay-card {
+  background: #0d0f14;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 18px;
+  max-width: 520px;
+  width: min(520px, 100%);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.overlay-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.chips.selectable {
+  margin: 10px 0;
+}
+
+.chips.selectable button {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.chips.selectable button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #050505;
+}
+
+.receipts-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
+  gap: 12px;
+  align-items: center;
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.switch input {
+  display: none;
+}
+
+.switch .slider {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  transition: background 0.2s ease;
+}
+
+.switch .slider::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.switch input:checked + .slider {
+  background: var(--accent);
+}
+
+.switch input:checked + .slider::after {
+  transform: translateX(20px);
+  background: #050505;
+}
+
+.switch .label {
+  color: var(--text);
+  font-size: 14px;
+}
+
 @media (max-width: 720px) {
   .summary-row {
     grid-template-columns: 1fr 1fr;
@@ -312,6 +500,12 @@ select:focus {
   }
   .items-table {
     font-size: 13px;
+  }
+  .items-table .people-col {
+    display: none;
+  }
+  .items-table .mobile-join {
+    display: table-cell;
   }
   .receipt-head {
     align-items: flex-start;

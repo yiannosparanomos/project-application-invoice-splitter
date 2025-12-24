@@ -16,6 +16,10 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import uuid
+import os
+import html as html_lib
+from email import message_from_bytes, policy
+from io import BytesIO
 from http.server import SimpleHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingMixIn
@@ -52,6 +56,8 @@ DEFAULT_PEOPLE = ["Yiannos", "Ntinos", "Ari", "Eva", "Athanasia", "Spiros", "Roz
 DEFAULT_STATE = {"people": list(DEFAULT_PEOPLE), "receipts": []}
 
 QR_API = "https://api.qrserver.com/v1/read-qr-code/?outputformat=json"
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+HEADLESS_FETCH = os.environ.get("HEADLESS_FETCH", "0").lower() in {"1", "true", "yes", "on"}
 
 
 def load_state():
@@ -275,9 +281,10 @@ def detect_parser(html_text):
 
 
 def parse_invoice(html_text):
-    parser_key = detect_parser(html_text)
+    html_clean = ensure_plain_html(html_text or "")
+    parser_key = detect_parser(html_clean)
     parser_fn = PARSERS.get(parser_key, parse_invoice_mymarket)
-    invoice = parser_fn(html_text or "")
+    invoice = parser_fn(html_clean or "")
     invoice["parser"] = parser_key
     return invoice
 
@@ -354,7 +361,11 @@ def post_qr_for_data(file_bytes, filename="qr.png", timeout=10):
     except urllib.error.URLError as e:
         debug(f"qr api URLError {e}")
         raise
-    decoded = json.loads(raw.decode("utf-8", errors="ignore"))
+    try:
+        decoded = json.loads(raw.decode("utf-8", errors="ignore"))
+    except Exception as e:
+        debug(f"qr api decode error: {e} raw={raw[:200]!r}")
+        raise
     # expected structure: [{ symbol: [{ data: "..." }]}]
     data = None
     if isinstance(decoded, list) and decoded:
@@ -364,11 +375,227 @@ def post_qr_for_data(file_bytes, filename="qr.png", timeout=10):
     return data
 
 
-def fetch_html(url, timeout=10):
-    req = urllib.request.Request(url, headers={"User-Agent": "trip-splitter/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        charset = resp.headers.get_content_charset() or "utf-8"
-        return resp.read().decode(charset, errors="ignore")
+def decode_qr_locally(file_bytes):
+    """
+    Try to decode QR locally using Pillow + pyzbar when available.
+    Returns tuple of (data_str or None, error_reason or None).
+    """
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+        from pyzbar.pyzbar import decode as zbar_decode  # type: ignore
+    except ImportError:
+        debug("qr decode local: optional deps (Pillow/pyzbar) not installed")
+        return None, "missing dependencies"
+    try:
+        img = Image.open(BytesIO(file_bytes))
+    except Exception as e:
+        debug(f"qr decode local: failed to open image: {e}")
+        return None, f"open error: {e}"
+    variants = []
+    # Base variants: RGB, grayscale autocontrast, hard-threshold
+    try:
+        variants.append(("orig", img.convert("RGB")))
+    except Exception:
+        variants.append(("orig", img))
+    try:
+        gray = ImageOps.autocontrast(img.convert("L"))
+        variants.append(("gray", gray))
+        # light threshold to boost contrast
+        thresh = gray.point(lambda p: 255 if p > 160 else 0)
+        variants.append(("thresh", thresh))
+    except Exception:
+        pass
+    # Resize to common widths to help detection (up and down)
+    max_side = max(img.size)
+    targets = [480, 640, 800, 1024, 1280]
+    resized = []
+    for label, base in variants:
+        for target in targets:
+            if max_side == 0:
+                continue
+            scale = target / max_side
+            if 0.5 <= scale <= 2.0:
+                new_size = (max(1, int(base.size[0] * scale)), max(1, int(base.size[1] * scale)))
+                try:
+                    resized_img = base.resize(new_size, Image.LANCZOS)
+                    resized.append((f"{label}-w{new_size[0]}", resized_img))
+                except Exception:
+                    continue
+    variants.extend(resized)
+
+    attempts = []
+    for label, candidate in variants:
+        try:
+            results = zbar_decode(candidate)
+        except Exception as e:
+            debug(f"qr decode local: zbar decode raised {e} on {label}")
+            continue
+        count = len(results) if results else 0
+        attempts.append(f"{label}:{count}")
+        if results:
+            data_bytes = getattr(results[0], "data", b"") or b""
+            decoded = data_bytes.decode("utf-8", errors="ignore")
+            debug(f"qr decode local: success variant={label} size={candidate.size} symbols={count} payload_len={len(decoded)}")
+            return decoded, None
+    debug(f"qr decode local: no QR symbols found after variants {attempts}")
+    return None, "no qr found"
+
+
+def decode_qr_best_effort(file_bytes, filename="qr.png"):
+    """
+    Try local QR decode first (Pillow/pyzbar). Fall back to remote API if needed.
+    Returns tuple: (decoded_data or None, source: 'local'|'remote'|None, local_error or None)
+    """
+    decoded_data = None
+    decode_source = None
+    local_err = None
+    local_data, local_err = decode_qr_locally(file_bytes)
+    if local_data:
+        return local_data, "local", local_err
+    debug(f"qr decode: local decode unavailable/failed ({local_err}); will try remote API")
+    decoded_data = post_qr_for_data(file_bytes, filename=filename)
+    decode_source = "remote"
+    debug(f"qr decoded data preview={str(decoded_data)[:120]!r} source={decode_source}")
+    return decoded_data, decode_source, local_err
+
+
+def extract_html_from_mhtml(raw_bytes):
+    """
+    Attempt to extract the first text/html part from an MHTML (multipart/related) blob.
+    Returns HTML string or None.
+    """
+    def _decode_part(part):
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            return None
+        charset = part.get_content_charset() or "utf-8"
+        try:
+            return payload.decode(charset)
+        except Exception:
+            try:
+                return payload.decode("utf-8", errors="ignore")
+            except Exception:
+                return None
+
+    try:
+        msg = message_from_bytes(raw_bytes, policy=policy.default)
+    except Exception as e:
+        debug(f"mhtml parse failed: {e}")
+        return None
+
+    best_html = None
+    best_len = -1
+    try:
+        parts = list(msg.walk()) if msg.is_multipart() else [msg]
+        for part in parts:
+            if part.get_content_type() != "text/html":
+                continue
+            decoded = _decode_part(part)
+            if decoded:
+                dlen = len(decoded)
+                if dlen > best_len:
+                    best_len = dlen
+                    best_html = decoded
+        if best_html:
+            debug(f"mhtml html parts found={len([p for p in parts if p.get_content_type()=='text/html'])} using_len={best_len}")
+            return best_html
+    except Exception as e:
+        debug(f"mhtml walk failed: {e}")
+        return None
+    return best_html
+
+
+def ensure_plain_html(html_input):
+    """
+    If input appears to be MHTML, try to extract the HTML part. Otherwise ensure string.
+    """
+    if html_input is None:
+        return ""
+    if isinstance(html_input, bytes):
+        raw_bytes = html_input
+        hint = raw_bytes[:2048].decode("utf-8", errors="ignore")
+    else:
+        hint = str(html_input)
+        raw_bytes = hint.encode("utf-8", errors="ignore")
+    looks_mhtml = "Content-Type: multipart/related" in hint[:2048] or "Snapshot-Content-Location:" in hint[:2048]
+    if looks_mhtml:
+        extracted = extract_html_from_mhtml(raw_bytes)
+        if extracted:
+            debug(f"mhtml detected -> extracted html len={len(extracted)}")
+            return extracted
+        debug("mhtml detected but html extraction failed; falling back to raw text")
+    return hint
+
+
+def maybe_follow_entersoft_iframe(html_text, url, timeout=10):
+    """
+    Entersoft invoices load the real document inside an iframe. When we fetch the outer
+    wrapper (from the QR URL), follow the iframe to return the actual invoice HTML.
+    """
+    if not (html_text and url):
+        return html_text
+    lower = html_text.lower()
+    if "getinvoice" not in lower or ("entersoft" not in lower and "e-invoicing" not in lower):
+        return html_text
+    match = re.search(r'<iframe[^>]+src=["\']([^"\']*GetInvoice[^"\']+)["\']', html_text, re.IGNORECASE)
+    if not match:
+        return html_text
+    iframe_src = html_lib.unescape(match.group(1))
+    iframe_url = urllib.parse.urljoin(url, iframe_src)
+    try:
+        inner_html = fetch_html(iframe_url, timeout=timeout, follow_entersoft=False)
+        if inner_html:
+            debug(f"fetch_html entersoft iframe resolved url={iframe_url} len={len(inner_html)}")
+            return inner_html
+        debug(f"fetch_html entersoft iframe empty content url={iframe_url}")
+    except urllib.error.URLError as e:
+        debug(f"fetch_html entersoft iframe URLError {e}")
+    except Exception as e:
+        debug(f"fetch_html entersoft iframe unexpected error {e}")
+    return html_text
+
+
+def fetch_html(url, timeout=10, *, follow_entersoft=True):
+    """
+    Fetch HTML via simple GET; optionally fall back to headless Playwright if enabled.
+    Enable fallback with env HEADLESS_FETCH=1 (requires playwright + chromium installed).
+    """
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    html = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            charset = resp.headers.get_content_charset() or "utf-8"
+            html = resp.read().decode(charset, errors="ignore")
+            debug(f"fetch_html basic len={len(html) if html else 0}")
+    except urllib.error.URLError as e:
+        debug(f"fetch_html basic URLError {e}")
+    if HEADLESS_FETCH and (not html or len(html) <= 8000):
+        try:
+            from playwright.sync_api import sync_playwright  # type: ignore
+        except ImportError:
+            debug("headless fetch requested but playwright not installed")
+        else:
+            try:
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    page = browser.new_page(user_agent=USER_AGENT)
+                    page.goto(url, wait_until="networkidle", timeout=timeout * 1000)
+                    page.wait_for_timeout(1000)
+                    html = page.content()
+                    debug(f"headless fetch len={len(html) if html else 0}")
+                    browser.close()
+            except Exception as e:
+                debug(f"headless fetch failed: {e}")
+    if follow_entersoft:
+        html = maybe_follow_entersoft_iframe(html, url, timeout=timeout)
+    return html
 
 
 def compute_summary(state):
@@ -418,6 +645,13 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - - [%s] %s\n" % (self.client_address[0], self.log_date_time_string(), fmt % args))
+
+    def end_headers(self):
+        # Prevent stale assets on mobile by disabling caching for all responses.
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
 
     # ------- helpers -------
     def send_json(self, data, status=200):
@@ -561,29 +795,59 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "Empty file"}, status=400)
         if size_bytes > 1_200_000:
             debug("qr decode: warning image over recommended 1MB, API may reject")
-        decoded_data = None
         try:
-            decoded_data = post_qr_for_data(file_bytes, filename=file_field.filename or "qr.png")
-            debug(f"qr decoded data preview={str(decoded_data)[:120]!r}")
+            decoded_data, decode_source, local_err = decode_qr_best_effort(
+                file_bytes, filename=file_field.filename or "qr.png"
+            )
         except urllib.error.URLError as e:
-            debug(f"qr decode URLError {e}")
-            return self.send_json({"error": f"QR decode failed: {e}"}, status=502)
+            debug(f"qr decode URLError {e} (source={decode_source or 'remote'})")
+            return self.send_json(
+                {"error": f"QR decode failed: network error ({e})", "source": decode_source or "remote", "local_error": local_err},
+                status=502,
+            )
+        except Exception as e:
+            debug(f"qr decode unexpected error {e} (source={decode_source or 'remote'})")
+            return self.send_json(
+                {"error": f"QR decode failed unexpectedly ({e})", "source": decode_source or "remote", "local_error": local_err},
+                status=500,
+            )
         if not decoded_data:
-            debug("qr decode: could not read QR code (empty data)")
-            return self.send_json({"error": "Could not read QR code"}, status=422)
+            debug(f"qr decode: could not read QR code (empty data) source={decode_source or 'unknown'}")
+            return self.send_json(
+                {"error": "Could not read QR code (no data returned)", "source": decode_source or "unknown", "local_error": local_err},
+                status=422,
+            )
         html_text = None
+        fetch_error = None
         decoded_str = decoded_data.strip() if isinstance(decoded_data, str) else ""
         try:
             if decoded_str.startswith("http://") or decoded_str.startswith("https://"):
                 html_text = fetch_html(decoded_str)
-                debug(f"qr decode fetched html len={len(html_text) if html_text else 0}")
+                debug(
+                    f"qr decode fetched html len={len(html_text) if html_text else 0} "
+                    f"source={decode_source or 'remote'} url={decoded_str}"
+                )
             else:
                 # Some QR codes embed the invoice HTML directly
                 html_text = decoded_str or None
-        except urllib.error.URLError:
-            debug("qr decode fetch html URLError")
+        except urllib.error.URLError as e:
+            fetch_error = str(e)
+            debug(f"qr decode fetch html URLError (likely offline or bad URL) err={e}")
             html_text = None
-        return self.send_json({"ok": True, "qr_data": decoded_str, "html_text": html_text})
+        snippet = (html_text or "")[:200].replace("\n", " ")
+        if snippet:
+            debug(f"qr decode html snippet: {snippet!r}")
+        return self.send_json(
+            {
+                "ok": True,
+                "qr_data": decoded_str,
+                "html_text": html_text,
+                "html_len": len(html_text) if html_text else 0,
+                "source": decode_source or "remote",
+                "local_error": local_err,
+                "fetch_error": fetch_error,
+            }
+        )
 
     def handle_update_participants(self, path):
         parts = path.rstrip("/").split("/")
@@ -786,23 +1050,39 @@ def create_fastapi_app():
         size_bytes = len(file_bytes)
         if size_bytes > 1_200_000:
             debug("qr decode: warning image over recommended 1MB, API may reject")
-        decoded_str = ""
         try:
-            decoded_url = post_qr_for_data(file_bytes, filename=file.filename or "qr.png")
-            decoded_str = decoded_url.strip() if isinstance(decoded_url, str) else ""
+            decoded_data, decode_source, local_err = decode_qr_best_effort(
+                file_bytes, filename=file.filename or "qr.png"
+            )
         except urllib.error.URLError as e:
-            raise HTTPException(status_code=502, detail=f"QR decode failed: {e}") from e
-        if not decoded_str:
+            raise HTTPException(
+                status_code=502,
+                detail=f"QR decode failed: network error ({e})",
+            ) from e
+        except Exception as e:  # pragma: no cover - safety net
+            raise HTTPException(status_code=500, detail=f"QR decode failed unexpectedly ({e})") from e
+        if not decoded_data:
             raise HTTPException(status_code=422, detail="Could not read QR code")
+
         html_text = None
+        fetch_error = None
+        decoded_str = decoded_data.strip() if isinstance(decoded_data, str) else ""
         try:
             if decoded_str.startswith("http://") or decoded_str.startswith("https://"):
                 html_text = fetch_html(decoded_str)
             else:
                 html_text = decoded_str or None
-        except urllib.error.URLError:
+        except urllib.error.URLError as e:
+            fetch_error = str(e)
             debug("qr decode fetch html URLError")
-        return {"ok": True, "qr_data": decoded_str, "html_text": html_text}
+        return {
+            "ok": True,
+            "qr_data": decoded_str,
+            "html_text": html_text,
+            "source": decode_source,
+            "local_error": local_err,
+            "fetch_error": fetch_error,
+        }
 
     @app.post("/api/receipts/{receipt_id}/participants")
     async def api_participants(receipt_id: str, payload: dict = Body(...)):
