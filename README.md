@@ -1,5 +1,9 @@
 # Trip Splitter (Dockerized)
 
+```bash
+pip install fastapi uvicorn
+```
+
 Lightweight Python app to parse invoice HTML and split costs. No external deps beyond Python stdlib.
 
 ## Run locally (no Docker)
@@ -24,6 +28,7 @@ Notes:
 - HTTP on `PORT` (default 8000); override with `PORT=9000 docker compose up -d --build`.
 - SSL/TLS should terminate at your VPS reverse proxy (nginx/caddy/etc.); the container serves plain HTTP on `PORT`.
 - Host volumes `./data` and `./uploads` hold state/uploads so the image stays lean.
+- Container runs as root by default to avoid bind-mount permission issues. If you prefer non-root, run with `--user appuser` (or set `user: appuser` in Compose) and ensure `data`/`uploads` are writable by that user.
 
 ## Build & run with Docker (optional)
 ```bash

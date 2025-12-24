@@ -48,20 +48,55 @@ def debug(msg):
     sys.stderr.flush()
 
 
-DEFAULT_STATE = {
-    "people": ["Yiannos", "Ntinos", "Ari", "Eva", "Spiros", "Athanasia", "Rozina", "Anna"],
-    "receipts": []
-}
+DEFAULT_PEOPLE = ["Yiannos", "Ntinos", "Ari", "Eva", "Athanasia", "Spiros", "Rozina", "Anna"]
+DEFAULT_STATE = {"people": list(DEFAULT_PEOPLE), "receipts": []}
 
 QR_API = "https://api.qrserver.com/v1/read-qr-code/?outputformat=json"
 
 
 def load_state():
     ensure_dirs()
-    if not DATA_FILE.exists():
-        save_state(DEFAULT_STATE)
-    with DATA_FILE.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+    raw = {}
+    if DATA_FILE.exists():
+        try:
+            with DATA_FILE.open("r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except json.JSONDecodeError:
+            debug("state file contained invalid JSON; recreating from defaults")
+            raw = {}
+    state = normalize_state(raw)
+    if (not DATA_FILE.exists()) or state != raw:
+        save_state(state)
+    return state
+
+
+def normalize_state(raw_state):
+    """
+    Ensure required keys exist, defaults are present, and names are de-duped/cleaned.
+    """
+    people = []
+    seen = set()
+
+    def add_person(name):
+        cleaned = clean(name)
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            people.append(cleaned)
+
+    # Always seed with defaults in the requested order
+    for default_name in DEFAULT_PEOPLE:
+        add_person(default_name)
+
+    raw_people = raw_state.get("people") if isinstance(raw_state, dict) else []
+    if isinstance(raw_people, list):
+        for name in raw_people:
+            add_person(name)
+
+    receipts = raw_state.get("receipts") if isinstance(raw_state, dict) else []
+    if not isinstance(receipts, list):
+        receipts = []
+
+    return {"people": people, "receipts": receipts}
 
 
 def save_state(state):
@@ -83,8 +118,16 @@ def parse_number(text):
         return None
     raw = str(text)
     raw = raw.replace("\xa0", "").replace(" ", "")
-    # Turn European decimals into dot decimals
-    if raw.count(",") == 1 and raw.count(".") == 0:
+    raw = re.sub(r"[^\d,.\-]", "", raw)
+    if not raw:
+        return None
+    # Handle common formats:
+    # - "1.234,56" (thousands with dot, decimal comma)
+    # - "1,234.56" (thousands with comma, decimal dot)
+    # - "1234,56" (decimal comma)
+    if "," in raw and "." in raw:
+        raw = raw.replace(".", "").replace(",", ".")
+    elif raw.count(",") == 1 and raw.count(".") == 0:
         raw = raw.replace(",", ".")
     else:
         raw = raw.replace(",", "")
@@ -100,7 +143,8 @@ def extract_single(field, html):
     return clean(match.group(1)) if match else None
 
 
-def parse_invoice(html_text):
+# Parser: Supermarket "MyMarket" (original HTML format)
+def parse_invoice_mymarket(html_text):
     html = html_text or ""
     invoice = {
         "supplier_name": extract_single("RegisteredName", html),
@@ -140,6 +184,104 @@ def parse_invoice(html_text):
     return invoice
 
 
+def parse_invoice_entersoft(html_text):
+    """Parser for Entersoft-hosted Sklavenitis invoices."""
+    html = html_text or ""
+    supplier_name = None
+    header_names = re.findall(r'BoldBlueHeader[^>]*>([^<]+)</div>', html, re.IGNORECASE)
+    for name in header_names:
+        supplier_name = clean(name)
+        if supplier_name:
+            break
+    invoice_number = None
+    match_num = re.search(r"Αρ\.?\s*Παραστατικού:\s*([^<]+)", html, re.IGNORECASE)
+    if match_num:
+        invoice_number = clean(match_num.group(1))
+    invoice_date = None
+    match_date = re.search(r"Ημ/νία\s*έκδοσης:\s*([^<]+)", html, re.IGNORECASE)
+    if match_date:
+        invoice_date = clean(match_date.group(1))
+    supplier_vat = None
+    match_vat = re.search(r"Α\.?Φ\.?Μ:\s*([0-9]+)", html, re.IGNORECASE)
+    if match_vat:
+        supplier_vat = clean(match_vat.group(1))
+    payment_method = None
+    match_payment = re.search(r"Τρόπος\s+πληρωμής:[\s\S]*?<div[^>]*>\s*([^<]+)\s*</div>", html, re.IGNORECASE)
+    if not match_payment:
+        match_payment = re.search(r"Τρόπος\s+Πληρωμής[\s\S]*?<div[^>]*>\s*([^<]+)\s*</div>", html, re.IGNORECASE)
+    if match_payment:
+        payment_method = clean(match_payment.group(1))
+
+    items = []
+    tbody_match = re.search(r"<tbody[^>]*>([\s\S]*?)</tbody>", html, re.IGNORECASE)
+    body_html = tbody_match.group(1) if tbody_match else ""
+    rows = re.findall(r"<tr[^>]*>([\s\S]*?)</tr>", body_html, re.IGNORECASE)
+    for row in rows:
+        desc = re.search(r'data-title="Περιγραφή"[^>]*>([\s\S]*?)</td>', row, re.IGNORECASE)
+        qty = re.search(r'data-title="Ποσότητα"[^>]*>([\s\S]*?)</td>', row, re.IGNORECASE)
+        price = re.search(r'data-title="Τιμή[^"]*"[^>]*>([\s\S]*?)</td>', row, re.IGNORECASE)
+        total = re.search(r'data-title="Συνολική Αξία"[^>]*>([\s\S]*?)</td>', row, re.IGNORECASE)
+        description = clean(desc.group(1)) if desc else None
+        quantity = parse_number(clean(qty.group(1)) if qty else None)
+        unit_price = parse_number(clean(price.group(1)) if price else None)
+        item_total = parse_number(clean(total.group(1)) if total else None)
+        if description or quantity is not None or unit_price is not None:
+            items.append(
+                {
+                    "id": uuid.uuid4().hex[:10],
+                    "description": description or "Item",
+                    "quantity": quantity,
+                    "price": unit_price,
+                    "total": item_total,
+                    "participants": []
+                }
+            )
+
+    total_amount = None
+    if items:
+        running = sum((it.get("total") or 0) for it in items)
+        total_amount = round(running, 2)
+    payment_amount_match = re.search(r"Ποσ[όο]\s+Πληρωμής[\s\S]*?<div[^>]*>\s*([0-9.,]+)\s*EUR", html, re.IGNORECASE)
+    if payment_amount_match:
+        total_amount = parse_number(payment_amount_match.group(1)) or total_amount
+
+    currency = "EUR" if "eur" in (html_text or "").lower() else None
+
+    return {
+        "supplier_name": supplier_name,
+        "supplier_vat": supplier_vat,
+        "invoice_number": invoice_number,
+        "invoice_date": invoice_date,
+        "currency": currency or "EUR",
+        "total_amount": total_amount,
+        "payment_method": payment_method,
+        "items": items
+    }
+
+
+PARSERS = {
+    "mymarket": parse_invoice_mymarket,
+    "entersoft": parse_invoice_entersoft,
+}
+
+
+def detect_parser(html_text):
+    html_lower = (html_text or "").lower()
+    if "entersoft" in html_lower or "e-invoicing.gr" in html_lower or "sklavenitis" in html_lower:
+        return "entersoft"
+    if "field-registeredname" in html_lower or "field-totalgrossvalue" in html_lower:
+        return "mymarket"
+    return "mymarket"
+
+
+def parse_invoice(html_text):
+    parser_key = detect_parser(html_text)
+    parser_fn = PARSERS.get(parser_key, parse_invoice_mymarket)
+    invoice = parser_fn(html_text or "")
+    invoice["parser"] = parser_key
+    return invoice
+
+
 def create_receipt_entry(html_text="", paid_by="", title="", notes="", file_bytes=None):
     ensure_dirs()
     if isinstance(html_text, bytes):
@@ -167,6 +309,7 @@ def create_receipt_entry(html_text="", paid_by="", title="", notes="", file_byte
         "items": invoice.get("items", []),
         "payment_method": invoice.get("payment_method"),
         "notes": (notes or "").strip(),
+        "parser": invoice.get("parser"),
         "raw_html_file": filename_saved,
         "created_at": dt.datetime.utcnow().isoformat() + "Z",
     }
@@ -418,25 +561,29 @@ class AppHandler(SimpleHTTPRequestHandler):
             return self.send_json({"error": "Empty file"}, status=400)
         if size_bytes > 1_200_000:
             debug("qr decode: warning image over recommended 1MB, API may reject")
-        decoded_url = None
+        decoded_data = None
         try:
-            decoded_url = post_qr_for_data(file_bytes, filename=file_field.filename or "qr.png")
-            debug(f"qr decoded data={decoded_url}")
+            decoded_data = post_qr_for_data(file_bytes, filename=file_field.filename or "qr.png")
+            debug(f"qr decoded data preview={str(decoded_data)[:120]!r}")
         except urllib.error.URLError as e:
             debug(f"qr decode URLError {e}")
             return self.send_json({"error": f"QR decode failed: {e}"}, status=502)
-        if not decoded_url:
+        if not decoded_data:
             debug("qr decode: could not read QR code (empty data)")
             return self.send_json({"error": "Could not read QR code"}, status=422)
         html_text = None
+        decoded_str = decoded_data.strip() if isinstance(decoded_data, str) else ""
         try:
-            if decoded_url.startswith("http://") or decoded_url.startswith("https://"):
-                html_text = fetch_html(decoded_url)
+            if decoded_str.startswith("http://") or decoded_str.startswith("https://"):
+                html_text = fetch_html(decoded_str)
                 debug(f"qr decode fetched html len={len(html_text) if html_text else 0}")
+            else:
+                # Some QR codes embed the invoice HTML directly
+                html_text = decoded_str or None
         except urllib.error.URLError:
             debug("qr decode fetch html URLError")
             html_text = None
-        return self.send_json({"ok": True, "qr_data": decoded_url, "html_text": html_text})
+        return self.send_json({"ok": True, "qr_data": decoded_str, "html_text": html_text})
 
     def handle_update_participants(self, path):
         parts = path.rstrip("/").split("/")
@@ -639,19 +786,23 @@ def create_fastapi_app():
         size_bytes = len(file_bytes)
         if size_bytes > 1_200_000:
             debug("qr decode: warning image over recommended 1MB, API may reject")
+        decoded_str = ""
         try:
             decoded_url = post_qr_for_data(file_bytes, filename=file.filename or "qr.png")
+            decoded_str = decoded_url.strip() if isinstance(decoded_url, str) else ""
         except urllib.error.URLError as e:
             raise HTTPException(status_code=502, detail=f"QR decode failed: {e}") from e
-        if not decoded_url:
+        if not decoded_str:
             raise HTTPException(status_code=422, detail="Could not read QR code")
         html_text = None
         try:
-            if decoded_url.startswith("http://") or decoded_url.startswith("https://"):
-                html_text = fetch_html(decoded_url)
+            if decoded_str.startswith("http://") or decoded_str.startswith("https://"):
+                html_text = fetch_html(decoded_str)
+            else:
+                html_text = decoded_str or None
         except urllib.error.URLError:
             debug("qr decode fetch html URLError")
-        return {"ok": True, "qr_data": decoded_url, "html_text": html_text}
+        return {"ok": True, "qr_data": decoded_str, "html_text": html_text}
 
     @app.post("/api/receipts/{receipt_id}/participants")
     async def api_participants(receipt_id: str, payload: dict = Body(...)):
