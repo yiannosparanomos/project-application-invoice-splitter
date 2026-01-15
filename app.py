@@ -25,6 +25,18 @@ from pathlib import Path
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
 
+from services.state_service import (
+    DEFAULT_PEOPLE,
+    DEFAULT_STATE,
+    clean,
+    compute_summary,
+    ensure_dirs as ensure_dirs_fs,
+    load_state as load_state_fs,
+    parse_number,
+    save_state as save_state_fs,
+)
+from services.parser_service import parse_invoice
+
 try:
     from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
@@ -40,8 +52,7 @@ DATA_FILE = DATA_DIR / "state.json"
 
 
 def ensure_dirs():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dirs_fs(DATA_DIR, UPLOAD_DIR)
 
 def debug(msg):
     prefix = "\033[96m---- DEBUG ----\033[0m"
@@ -52,63 +63,17 @@ def debug(msg):
     sys.stderr.flush()
 
 
-DEFAULT_PEOPLE = ["Yiannos", "Ntinos", "Ari", "Eva", "Athanasia", "Spiros", "Rozina", "Anna"]
-DEFAULT_STATE = {"people": list(DEFAULT_PEOPLE), "receipts": []}
-
 QR_API = "https://api.qrserver.com/v1/read-qr-code/?outputformat=json"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 HEADLESS_FETCH = os.environ.get("HEADLESS_FETCH", "0").lower() in {"1", "true", "yes", "on"}
 
 
 def load_state():
-    ensure_dirs()
-    raw = {}
-    if DATA_FILE.exists():
-        try:
-            with DATA_FILE.open("r", encoding="utf-8") as fh:
-                raw = json.load(fh)
-        except json.JSONDecodeError:
-            debug("state file contained invalid JSON; recreating from defaults")
-            raw = {}
-    state = normalize_state(raw)
-    if (not DATA_FILE.exists()) or state != raw:
-        save_state(state)
-    return state
-
-
-def normalize_state(raw_state):
-    """
-    Ensure required keys exist, defaults are present, and names are de-duped/cleaned.
-    """
-    people = []
-    seen = set()
-
-    def add_person(name):
-        cleaned = clean(name)
-        if cleaned and cleaned not in seen:
-            seen.add(cleaned)
-            people.append(cleaned)
-
-    # Always seed with defaults in the requested order
-    for default_name in DEFAULT_PEOPLE:
-        add_person(default_name)
-
-    raw_people = raw_state.get("people") if isinstance(raw_state, dict) else []
-    if isinstance(raw_people, list):
-        for name in raw_people:
-            add_person(name)
-
-    receipts = raw_state.get("receipts") if isinstance(raw_state, dict) else []
-    if not isinstance(receipts, list):
-        receipts = []
-
-    return {"people": people, "receipts": receipts}
+    return load_state_fs(DATA_FILE, DATA_DIR, UPLOAD_DIR)
 
 
 def save_state(state):
-    ensure_dirs()
-    with DATA_FILE.open("w", encoding="utf-8") as fh:
-        json.dump(state, fh, ensure_ascii=False, indent=2)
+    save_state_fs(state, DATA_FILE, DATA_DIR, UPLOAD_DIR)
 
 
 def clean(text):

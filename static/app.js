@@ -101,9 +101,19 @@ function renderOverlayPeople() {
     )
     .join("");
   overlayPeople.querySelectorAll("button[data-person]").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    const handler = () => {
       setCurrentUser(btn.dataset.person);
-    });
+      closeUserOverlay();
+    };
+    btn.addEventListener("click", handler);
+    btn.addEventListener(
+      "touchend",
+      (e) => {
+        e.preventDefault();
+        handler();
+      },
+      { passive: false }
+    );
   });
   renderCurrentUserLabel();
 }
@@ -112,12 +122,25 @@ function openUserOverlay() {
   if (!userOverlay) return;
   renderOverlayPeople();
   userOverlay.classList.remove("hidden");
-  setTimeout(() => overlayNewPerson?.focus(), 120);
+  userOverlay.style.display = "grid";
+  userOverlay.setAttribute("aria-hidden", "false");
+  if (document.body) {
+    document.body.classList.add("overlay-open");
+  }
+  const shouldAutofocus = window.matchMedia ? window.matchMedia("(pointer: fine)").matches : true;
+  if (shouldAutofocus) {
+    setTimeout(() => overlayNewPerson?.focus(), 120);
+  }
 }
 
 function closeUserOverlay() {
   if (!userOverlay) return;
   userOverlay.classList.add("hidden");
+  userOverlay.style.display = "none";
+  userOverlay.setAttribute("aria-hidden", "true");
+  if (document.body) {
+    document.body.classList.remove("overlay-open");
+  }
 }
 
 async function addPerson(name, setAsCurrent = false) {
